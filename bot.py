@@ -40,6 +40,11 @@ DACHA_LAT = float(os.getenv("DACHA_LAT", "56.003470"))
 DACHA_LON = float(os.getenv("DACHA_LON", "38.213553"))
 DACHA_NAME = os.getenv("DACHA_NAME", "Поместье Сергея")
 
+# Бот отвечает только в этих чатах (id через запятую в переменной ALLOWED_CHATS).
+# Пока список пуст, бот работает везде — узнайте id командой /chatid и заполните переменную.
+ALLOWED_CHATS = {int(x) for x in os.getenv("ALLOWED_CHATS", "").replace(" ", "").split(",")
+                 if x.lstrip("-").isdigit()}
+
 MSK = timezone(timedelta(hours=3))
 BASE_DIR = Path(__file__).resolve().parent
 DATA_FILE = BASE_DIR / "dacha_data.json"
@@ -216,6 +221,48 @@ def find_duplicate(ev: dict, what: str) -> dict | None:
 # ---------------------------------------------------------------- хэндлеры
 
 router = Router()
+
+
+# ---------------------------------------------------------------- доступ
+
+
+async def access_guard(handler, event, ctx):
+    """Пускает только свои чаты: чужой человек не увидит наш архив."""
+    message = event if isinstance(event, Message) else event.message
+    chat = message.chat
+    user = event.from_user
+
+    text = (message.text or "") if isinstance(event, Message) else ""
+    if text.startswith("/chatid"):
+        return await handler(event, ctx)
+
+    if not ALLOWED_CHATS:
+        return await handler(event, ctx)
+
+    if chat.type in ("group", "supergroup"):
+        if chat.id not in ALLOWED_CHATS:
+            log.warning("Чужой чат %s (%s) — игнорирую", chat.id, chat.title)
+            if isinstance(event, Message):
+                await message.answer("Этот бот сделан для одной конкретной компании 🙂")
+            return None
+    else:
+        if str(user.id) not in data["users"]:
+            log.warning("Чужая личка от %s (%s) — игнорирую", user.id, user.full_name)
+            if isinstance(event, Message):
+                await message.answer("Этот бот сделан для одной конкретной компании 🙂")
+            return None
+
+    return await handler(event, ctx)
+
+
+@router.message(Command("chatid"))
+async def cmd_chatid(message: Message):
+    await message.answer(
+        f"id этого чата: <code>{message.chat.id}</code>\n\n"
+        f"Впишите его в переменную окружения ALLOWED_CHATS — "
+        f"тогда бот будет работать только здесь."
+    )
+
 
 HELP = (
     "🏡 <b>Дачный бот</b>\n\n"
@@ -756,9 +803,12 @@ async def main() -> None:
     bot = Bot(token=get_token(), session=session,
               default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+    router.message.outer_middleware(access_guard)
+    router.callback_query.outer_middleware(access_guard)
     dp.include_router(router)
     dp.errors.register(on_error)
     log.info("Дачный бот запущен. Координаты: %s, %s", DACHA_LAT, DACHA_LON)
+    log.info("Разрешённые чаты: %s", ALLOWED_CHATS or "(пока все — задайте ALLOWED_CHATS)")
     asyncio.create_task(scheduler(bot))
     await dp.start_polling(bot)
 
